@@ -3,7 +3,7 @@ Base handler interface for processing Kafka messages.
 """
 import abc
 import logging
-from typing import Any, Callable, Dict
+from typing import Any, Awaitable, Callable, Dict
 
 
 
@@ -86,7 +86,7 @@ class BaseHandler(abc.ABC):
             bool: True if message is valid, False otherwise
         """
         # Validate required header fields
-        required_fields = ["message_id", "timestamp", "source"]
+        required_fields = ["messageType", "timestamp", "producer"]
         for field in required_fields:
             if field not in envelope.header:
                 logger.error(f"Missing required header field: {field}")

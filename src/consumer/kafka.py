@@ -44,21 +44,23 @@ class KafkaConsumer:
         """
         
         # Set up signal handlers for graceful shutdown
+        
         signal.signal(signal.SIGTERM, self._handle_shutdown)
         signal.signal(signal.SIGINT, self._handle_shutdown)
         
+
         
         # Configure Kafka consumer
         self.consumer = Consumer({
-            'bootstrap.servers': config.bootstrap_servers,
-            'group.id': config.group_id,
-            'auto.offset.reset': 'earliest',
+            'bootstrap.servers': self.config.bootstrap_servers,
+            'group.id': self.config.group_id,
+            'auto.offset.reset': self.config.auto_offset_reset,
             'enable.auto.commit': False,
         })
         
         # Configure dead letter queue producer
         self.dlq_producer = Producer({
-            'bootstrap.servers': config.bootstrap_servers,
+            'bootstrap.servers': self.config.bootstrap_servers,
         })
         
 
@@ -72,11 +74,6 @@ class KafkaConsumer:
         """
         self.handlers[topic] = handler
         logger.info(f"Registered handler {handler.__class__.__name__} for topic {topic}")
-
-    def _handle_shutdown(self, signum, frame) -> None:
-        """Handle shutdown signals gracefully."""
-        logger.info(f"Received signal {signum}, shutting down...")
-        self.running = False
 
     
     def start(self) -> None:
@@ -216,5 +213,10 @@ class KafkaConsumer:
         def send_to_dlq(reason: str) -> None:
             self._send_to_dlq(topic, original_message, reason)
         return send_to_dlq
+
+    def _handle_shutdown(self, signum, frame) -> None:
+        """Handle shutdown signals gracefully."""
+        logger.info(f"Received signal {signum}, shutting down...")
+        self.running = False
 
     
