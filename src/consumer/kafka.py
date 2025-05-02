@@ -86,7 +86,7 @@ class KafkaConsumer:
             *topics,
             bootstrap_servers=self.config.bootstrap_servers,
             group_id=self.config.group_id,
-            auto_offset_reset='earliest',
+            auto_offset_reset=self.config.auto_offset_reset,
             enable_auto_commit=False,
         )
         
