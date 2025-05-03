@@ -6,8 +6,13 @@ import logging
 from typing import Any, Callable, Dict
 
 
+from typing import Awaitable
 
-from ..models.envelope import MessageEnvelope
+
+
+
+
+from src.models.envelope import MessageEnvelope
 
 logger = logging.getLogger(__name__)
 
@@ -27,7 +32,7 @@ class BaseHandler(abc.ABC):
         self.max_retries = max_retries
     
     
-    async def handle(self, message_data: Dict[str, Any], send_to_dlq) -> bool:
+    async def handle(self, message_data: Dict[str, Any], send_to_dlq: Callable[[str], Awaitable[None]]) -> bool:
         """
         Process a message from Kafka.
         

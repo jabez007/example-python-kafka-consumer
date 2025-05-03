@@ -4,18 +4,23 @@ Kafka consumer implementation with dependency injection for handlers.
 import datetime
 import json
 import logging
+import random
 import signal
+from time import sleep
 from typing import Callable, Dict, Optional
 
 
 import asyncio
+from typing import Awaitable
 
 from aiokafka import AIOKafkaConsumer, AIOKafkaProducer
+from aiokafka.structs import TopicPartition
 
 
 
-from ..handlers.base import BaseHandler
-from .config import ConsumerConfig
+from src.consumer.config import ConsumerConfig
+from src.handlers.base import BaseHandler
+from src.models.envelope import MessageEnvelope
 
 """
 
@@ -46,12 +51,20 @@ class KafkaConsumer:
         """
         
         # Set up signal handlers for graceful shutdown
-        signal.signal(signal.SIGTERM, self._handle_shutdown)
-        signal.signal(signal.SIGINT, self._handle_shutdown)
         
+        loop = asyncio.get_event_loop()
+        for sig in (signal.SIGTERM, signal.SIGINT):
+            try:
+                loop.add_signal_handler(sig, lambda s=sig: asyncio.create_task(self._handle_shutdown(s)))
+            except NotImplementedError:
+                # Fallback for Windows / non-main thread
+                signal.signal(sig, lambda *_: asyncio.create_task(self._handle_shutdown(sig)))
+        
+
         
         # These will be initialized in start() for aiokafka
         self.consumer = None
+        self.retry_producer = None
         self.dlq_producer = None
         
 
@@ -65,11 +78,6 @@ class KafkaConsumer:
         """
         self.handlers[topic] = handler
         logger.info(f"Registered handler {handler.__class__.__name__} for topic {topic}")
-
-    def _handle_shutdown(self, signum, frame) -> None:
-        """Handle shutdown signals gracefully."""
-        logger.info(f"Received signal {signum}, shutting down...")
-        self.running = False
 
     
     async def start(self) -> None:
@@ -119,10 +127,11 @@ class KafkaConsumer:
                             # Parse message
                             try:
                                 message_data = json.loads(msg.value.decode('utf-8'))
-                            except json.JSONDecodeError:
+                            except (UnicodeError, json.JSONDecodeError):
                                 logger.error(f"Failed to decode message as JSON from topic {topic}")
                                 await self._send_to_dlq(topic, msg.value, "Invalid JSON format")
-                                await self.consumer.commit({msg.tp: msg.offset + 1})
+                                tp = TopicPartition(msg.topic, msg.partition)
+                                await self.consumer.commit({tp: msg.offset + 1})
                                 """
                                 
                                 """
@@ -138,7 +147,8 @@ class KafkaConsumer:
                                 success = handler.handle(message_data, dlq_callback)
                             
                             if success:
-                                await self.consumer.commit({msg.tp: msg.offset + 1})
+                                tp = TopicPartition(msg.topic, msg.partition)
+                                await self.consumer.commit({tp: msg.offset + 1})
                                 """
                                 
                                 """
@@ -151,7 +161,8 @@ class KafkaConsumer:
                         except Exception as e:
                             logger.exception(f"Error processing message from {topic}: {e}")
                             await self._send_to_dlq(topic, msg.value, str(e))
-                            await self.consumer.commit({msg.tp: msg.offset + 1})
+                            tp = TopicPartition(msg.topic, msg.partition)
+                            await self.consumer.commit({tp: msg.offset + 1})
                             """
                             
                             """
@@ -202,7 +213,7 @@ class KafkaConsumer:
         except Exception as e:
             logger.error(f"Failed to send message to DLQ {dlq_topic}: {e}")
 
-    def _get_dlq_callback(self, topic: str, original_message: bytes) -> Callable[[str], None]:
+    def _get_dlq_callback(self, topic: str, original_message: bytes) -> Callable[[str], Awaitable[None]]:
         """
         Return a callback function for handlers to send messages to DLQ.
         
@@ -216,4 +227,11 @@ class KafkaConsumer:
         async def send_to_dlq(reason: str) -> None:
             await self._send_to_dlq(topic, original_message, reason)
         return send_to_dlq
+
+    async def _handle_shutdown(self, signum) -> None:
+        """Handle shutdown signals gracefully."""
+        logger.info("Received signal %s, shutting down…", signum)
+        self.running = False
+        if self.consumer is not None:
+            await self.consumer.stop()
     
