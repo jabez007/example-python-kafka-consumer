@@ -9,7 +9,7 @@ from typing import Any, Callable, Dict
 
 
 
-from ..models.envelope import MessageEnvelope
+from src.models.envelope import MessageEnvelope
 
 logger = logging.getLogger(__name__)
 
@@ -50,7 +50,7 @@ class BaseHandler(abc.ABC):
                 return True
             
             # Extract retry count if present
-            retry_count = envelope.header.get("retryCount", 0)
+            retry_count = int(envelope.header.get("retryCount", 0))
             
             try:
                 # Process the message

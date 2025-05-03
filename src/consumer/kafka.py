@@ -12,9 +12,9 @@ from confluent_kafka import Consumer, KafkaError, Message, Producer
 
 
 
-from ..handlers.base import BaseHandler
-from ..models.envelope import MessageEnvelope
-from .config import ConsumerConfig
+from src.consumer.config import ConsumerConfig
+from src.handlers.base import BaseHandler
+from src.models.envelope import MessageEnvelope
 
 """
 
@@ -62,10 +62,16 @@ class KafkaConsumer:
         # Configure retry producer
         self.retry_producer = Producer({
             'bootstrap.servers': self.config.bootstrap_servers,
+            'retries': 3,
+            'retry.backoff.ms': 500,
+            'delivery.timeout.ms': 10000,
         })
         # Configure dead letter queue producer
         self.dlq_producer = Producer({
             'bootstrap.servers': self.config.bootstrap_servers,
+            'retries': 3,
+            'retry.backoff.ms': 500,
+            'delivery.timeout.ms': 10000,
         })
         
 
@@ -161,6 +167,10 @@ class KafkaConsumer:
         finally:
             logger.info("Closing consumer")
             self.consumer.close()
+            # Flush any pending messages and close producers
+            logger.info("Flushing and closing producers")
+            self.retry_producer.flush()
+            self.dlq_producer.flush()
 
     def _retry_message(self, original_topic: str, failed_message: MessageEnvelope, reason: str) -> None:
         """
@@ -174,7 +184,7 @@ class KafkaConsumer:
         retry_topic = f'{original_topic}.retry'
 
         # Extract retry count if present
-        retry_count = failed_message.header.get("retryCount", 0)
+        retry_count = int(failed_message.header.get("retryCount", 0))
 
         # Increment retry count for next attempt
         failed_message.header["retryCount"] = retry_count + 1
@@ -187,7 +197,7 @@ class KafkaConsumer:
             # Produce new message with updated headers
             self.retry_producer.produce(
                 retry_topic,
-                json.dumps(failed_message.to_dict()).encode("uf-8"),
+                json.dumps(failed_message.to_dict()).encode("utf-8"),
                 callback=self._delivery_report
             )
             # allow delivery callback processing without blocking
