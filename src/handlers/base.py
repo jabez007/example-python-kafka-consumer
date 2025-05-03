@@ -3,7 +3,9 @@ Base handler interface for processing Kafka messages.
 """
 import abc
 import logging
-from typing import Any, Awaitable, Callable, Dict
+from typing import Any, Callable, Dict
+
+
 
 
 
@@ -27,7 +29,7 @@ class BaseHandler(abc.ABC):
         self.max_retries = max_retries
     
     
-    def handle(self, message_data: Dict[str, Any], send_to_dlq: Callable[[str], None]) -> bool:
+    def handle(self, message_data: Dict[str, Any], retry_message: Callable[[MessageEnvelope, str], None], send_to_dlq: Callable[[str], None]) -> bool:
         """
         Process a message from Kafka.
         
@@ -60,10 +62,8 @@ class BaseHandler(abc.ABC):
                 # Check if we should retry
                 if retry_count < self.max_retries:
                     logger.info(f"Retrying message, attempt {retry_count + 1} of {self.max_retries}")
-                    # Increment retry count for next attempt
-                    envelope.header["retryCount"] = retry_count + 1
-                    # Return False to prevent committing the offset
-                    return False
+                    retry_message(envelope, str(e))
+                    return True
                 else:
                     logger.warning(f"Max retries ({self.max_retries}) reached, sending to DLQ")
                     send_to_dlq(f"Max retries reached: {str(e)}")
