@@ -58,7 +58,7 @@ class KafkaConsumer:
                 loop.add_signal_handler(sig, lambda s=sig: asyncio.create_task(self._handle_shutdown(s)))
             except NotImplementedError:
                 # Fallback for Windows / non-main thread
-                signal.signal(sig, lambda *_: asyncio.create_task(self._handle_shutdown(sig)))
+                signal.signal(sig, lambda s=sig, *_: asyncio.create_task(self._handle_shutdown(s)))
         
 
         
@@ -98,11 +98,16 @@ class KafkaConsumer:
             enable_auto_commit=False,
         )
         
+        self.retry_producer = AIOKafkaProducer(
+            bootstrap_servers=self.config.bootstrap_servers,
+        )
+
         self.dlq_producer = AIOKafkaProducer(
             bootstrap_servers=self.config.bootstrap_servers,
         )
         
         await self.consumer.start()
+        await self.retry_producer.start()
         await self.dlq_producer.start()
         
         logger.info(f"Subscribed to topics: {', '.join(topics)}")
@@ -138,13 +143,14 @@ class KafkaConsumer:
                                 continue
                             
                             # Process message
+                            retry_callback = self._get_retry_callback(topic)
                             dlq_callback = self._get_dlq_callback(topic, msg.value)
                             
                             # Handle synchronous or async handler
                             if asyncio.iscoroutinefunction(handler.handle):
-                                success = await handler.handle(message_data, dlq_callback)
+                                success = await handler.handle(message_data, retry_callback, dlq_callback)
                             else:
-                                success = handler.handle(message_data, dlq_callback)
+                                success = handler.handle(message_data, retry_callback, dlq_callback)
                             
                             if success:
                                 tp = TopicPartition(msg.topic, msg.partition)
@@ -154,6 +160,7 @@ class KafkaConsumer:
                                 """
                             else:
                                 logger.warning(f"Handler returned False for message in topic {topic}")
+                                sleep(random.uniform(1, 3)) # avoid hammering both the broker and our logs. 
                                 """
                                 
                                 """
@@ -176,9 +183,45 @@ class KafkaConsumer:
                         await asyncio.sleep(1)
                     
         finally:
-            logger.info("Closing consumer and producer")
+            logger.info("Closing consumer and producers")
             await self.consumer.stop()
+            await self.retry_producer.stop()
             await self.dlq_producer.stop()
+
+    async def _retry_message(self, original_topic: str, failed_message: MessageEnvelope, reason: str) -> None:
+        """
+        Send a message to the retry queue.
+        
+        Args:
+            original_topic: Original topic the message came from
+            failed_message: Envelope of failed message
+            reason: Reason for retrying message
+        """
+        retry_topic = f'{original_topic}.retry'
+        
+        # Extract retry count if present
+        retry_count = int(failed_message.header.get("retryCount", 0))
+
+        # Increment retry count for next attempt
+        failed_message.header["retryCount"] = retry_count + 1
+
+        # Include metadata about original topic
+        failed_message.header["originalTopic"] = original_topic
+        failed_message.header["retryReason"] = reason
+
+        try:
+            await self.retry_producer.send_and_wait(
+                retry_topic,
+                json.dumps(failed_message).encode('utf-8')
+            )
+            
+            logger.info(f"Message sent to retry topic {retry_topic}, attempt {retry_count}")
+            """
+            
+            """
+
+        except Exception as e:
+            logger.error(f"Failed to send message to retry {retry_topic}: {e}")
 
     async def _send_to_dlq(self, original_topic: str, message: bytes, reason: str) -> None:
         """
@@ -189,7 +232,7 @@ class KafkaConsumer:
             message: Original message bytes
             reason: Reason for sending to DLQ
         """
-        dlq_topic = f"{original_topic}.dlq"
+        dlq_topic = f'{original_topic}.dlq'
         
         try:
             # Create a wrapper that includes the original message and metadata
@@ -213,6 +256,20 @@ class KafkaConsumer:
         except Exception as e:
             logger.error(f"Failed to send message to DLQ {dlq_topic}: {e}")
 
+    def _get_retry_callback(self, topic: str) -> Callable[[MessageEnvelope, str], Awaitable[None]]:
+        """
+        Return a callback function for handlers to send messages to retry topic.
+        
+        Args:
+            topic: Original topic
+        
+        Returns:
+            Callable function that sends to retry topic with given reason
+        """
+        async def retry_message(original_message: MessageEnvelope, reason: str) -> None:
+            await self._retry_message(topic, original_message, reason)
+        return retry_message
+
     def _get_dlq_callback(self, topic: str, original_message: bytes) -> Callable[[str], Awaitable[None]]:
         """
         Return a callback function for handlers to send messages to DLQ.
@@ -234,4 +291,8 @@ class KafkaConsumer:
         self.running = False
         if self.consumer is not None:
             await self.consumer.stop()
+        if self.retry_producer is not None:
+            await self.retry_producer.stop()
+        if self.dlq_producer is not None:
+            await self.dlq_producer.stop()
     
