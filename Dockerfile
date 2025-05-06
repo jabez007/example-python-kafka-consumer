@@ -8,12 +8,6 @@ WORKDIR /app
 # Create a non-root user
 RUN adduser --disabled-password --gecos "" appuser
 
-# Optional: install system deps
-RUN apt-get update -y && \
-    apt-get install -y \
-        curl \
-    && rm -rf /var/lib/apt/lists/*
-
 
 # ---- Pip Setup ----
 # Copy requirements first for better caching
@@ -31,5 +25,5 @@ USER appuser
 
 # Default CMD to run consumer
 ENTRYPOINT [ "python" ]
-CMD [ "./src/main.py" ]
+CMD [ "/app/src/main.py" ]
 
