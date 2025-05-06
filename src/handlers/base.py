@@ -70,7 +70,7 @@ class BaseHandler(abc.ABC):
                 # Check if we should retry
                 if retry_count < self.max_retries:
                     logger.info(f"Retrying message, attempt {retry_count + 1} of {self.max_retries}")
-                    await retry_message(envelope, str(e))
+                    await retry_message(envelope, repr(e))
                     return True
                 else:
                     logger.warning(f"Max retries ({self.max_retries}) reached, sending to DLQ")
