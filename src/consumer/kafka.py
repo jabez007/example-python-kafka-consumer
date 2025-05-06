@@ -6,7 +6,6 @@ import json
 import logging
 import random
 import signal
-from time import sleep
 from typing import Callable, Dict, Optional
 
 
@@ -160,7 +159,7 @@ class KafkaConsumer:
                                 """
                             else:
                                 logger.warning(f"Handler returned False for message in topic {topic}")
-                                sleep(random.uniform(1, 3)) # avoid hammering both the broker and our logs. 
+                                await asyncio.sleep(random.uniform(1, 3)) # avoid hammering both the broker and our logs. 
                                 """
                                 
                                 """
@@ -200,7 +199,11 @@ class KafkaConsumer:
         retry_topic = f'{original_topic}.retry'
         
         # Extract retry count if present
-        retry_count = int(failed_message.header.get("retryCount", 0))
+        try:
+            retry_count = int(failed_message.header.get("retryCount", 0))
+        except ValueError:
+            logger.warning(f"Invalid retryCount value: {failed_message.header.get('retryCount')}, using 0")
+            retry_count = 0
 
         # Increment retry count for next attempt
         failed_message.header["retryCount"] = retry_count + 1
@@ -212,7 +215,7 @@ class KafkaConsumer:
         try:
             await self.retry_producer.send_and_wait(
                 retry_topic,
-                json.dumps(failed_message).encode('utf-8')
+                json.dumps(failed_message.to_dict()).encode('utf-8')
             )
             
             logger.info(f"Message sent to retry topic {retry_topic}, attempt {retry_count}")

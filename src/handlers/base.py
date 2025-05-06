@@ -38,6 +38,7 @@ class BaseHandler(abc.ABC):
         
         Args:
             message_data: The JSON-decoded message data
+            retry_message: Callback function to retry processing a message
             send_to_dlq: Callback function to send message to DLQ
             
         Returns:
@@ -53,8 +54,12 @@ class BaseHandler(abc.ABC):
                 return True
             
             # Extract retry count if present
-            retry_count = int(envelope.header.get("retryCount", 0))
-            
+            try:
+                retry_count = int(envelope.header.get("retryCount", 0))
+            except ValueError:
+                logger.warning(f"Invalid retryCount value: {envelope.header.get('retryCount')}, using 0")
+                retry_count = 0
+
             try:
                 # Process the message
                 return await self._process_message(envelope)
