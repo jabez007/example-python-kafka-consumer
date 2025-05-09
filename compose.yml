@@ -29,7 +29,11 @@ services:
     develop:
       watch:
         - path: .
-          patterns: ["*.py"]
+          patterns: 
+            - "src/**/*.py"
+            
+            - "requirements.txt"
+            
           action: rebuild
 
   kcat:

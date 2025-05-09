@@ -211,7 +211,7 @@ class KafkaConsumer:
         retry_topic = f'{original_topic}.retry'
         
         # Extract retry count if present
-        header = failed_message.header or {}
+        header = failed_message.header or {} # ensure not None
         try:
             retry_count = int(header.get("retryCount", 0))
         except ValueError:
@@ -221,7 +221,7 @@ class KafkaConsumer:
         envelope_copy = MessageEnvelope.from_dict(failed_message.to_dict())
 
         # Increment retry count for next attempt
-        envelope_copy.header = header # ensure not None
+        envelope_copy.header = {**header} # work on an isolated copy 
         envelope_copy.header["retryCount"] = str(retry_count + 1)
 
         # Include metadata about original topic
