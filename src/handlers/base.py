@@ -55,45 +55,44 @@ class BaseHandler(abc.ABC):
             send_to_dlq: Callback function to send message to DLQ
             
         Returns:
-            bool: True if message was processed successfully, False otherwise
+            bool: True if the message was handled (successfully processed, sent to DLQ, or scheduled for retry),
+                  False if handling failed and the message should be reprocessed
         """
+        # Parse the envelope structure
         try:
-            # Parse the envelope structure
             envelope = MessageEnvelope.from_dict(message_data)
-            
-            try:
-                retry_count = int(envelope.header.get("retryCount", 0))
-            except (ValueError, TypeError):
-                logger.warning(f"Invalid retryCount value: {envelope.header.get('retryCount')}, using 0")
-                retry_count = 0
-
-            try:
-                # Process the message
-                return await self._process_message(envelope)
-                
-            except NonRetryableError as e:
-                logger.exception(f"Unrecoverable error processing message, sending to DLQ: {e}")
-
-                await send_to_dlq(f"Error processing message: {str(e)}")
-                return True
-
-            except (RetryableError, Exception) as e:
-                logger.exception(f"Error processing message: {e}")
-                
-                # Check if we should retry
-                if retry_count < self.max_retries:
-                    logger.info(f"Retrying message, attempt {retry_count + 1} of {self.max_retries}")
-                    await retry_message(envelope, repr(e))
-                    return True
-                else:
-                    logger.warning(f"Max retries ({self.max_retries}) reached, sending to DLQ")
-                    await send_to_dlq(f"Max retries reached: {str(e)}")
-                    return True
-                    
-        except Exception as e:
+        except (ValueError, TypeError) as e:
             logger.exception(f"Error parsing message envelope: {e}")
             await send_to_dlq(f"Error parsing message envelope: {str(e)}")
             return True
+
+        try:
+            retry_count = int(envelope.header.get("retryCount", 0))
+        except ValueError:
+            logger.warning(f"Invalid retryCount value: {envelope.header.get('retryCount')}, using 0")
+            retry_count = 0
+
+        try:
+            # Process the message
+            return await self._process_message(envelope)
+
+        except NonRetryableError as e:
+            logger.exception(f"Unrecoverable error processing message, sending to DLQ: {e}")
+            await send_to_dlq(f"Error processing message: {str(e)}")
+            return True
+
+        except RetryableError as e:
+            logger.exception(f"Error processing message: {e}")
+
+            # Check if we should retry
+            if retry_count < self.max_retries:
+                logger.info(f"Retrying message, attempt {retry_count + 1} of {self.max_retries}")
+                await retry_message(envelope, str(e))
+                return True
+            else:
+                logger.warning(f"Max retries ({self.max_retries}) reached, sending to DLQ")
+                await send_to_dlq(f"Max retries reached: {str(e)}")
+                return True
     
     
     
@@ -104,6 +103,10 @@ class BaseHandler(abc.ABC):
         
         Args:
             envelope: Message envelope containing header and body
+
+        Returns:
+            bool: True if the message was successfully processed and should be committed,
+                  False if processing failed and the message should not be committed
         """
         pass
     
