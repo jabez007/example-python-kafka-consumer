@@ -10,12 +10,21 @@ from typing import Awaitable
 
 
 
-
-
 from src.models.envelope import MessageEnvelope
 
 logger = logging.getLogger(__name__)
 
+class ProcessingError(Exception):
+    """Base exception for all message processing errors"""
+    pass
+
+class RetryableError(ProcessingError):
+    """Error indicating message should be retried"""
+    pass
+
+class NonRetryableError(ProcessingError):
+    """Error indicating message should go to DLQ"""
+    pass
 
 class BaseHandler(abc.ABC):
     """
@@ -32,7 +41,11 @@ class BaseHandler(abc.ABC):
         self.max_retries = max_retries
     
     
-    async def handle(self, message_data: Dict[str, Any], retry_message: Callable[[MessageEnvelope, str], Awaitable[None]], send_to_dlq: Callable[[str], Awaitable[None]]) -> bool:
+    async def handle(
+            self,
+            message_data: Dict[str, Any],
+            retry_message: Callable[[MessageEnvelope, str], Awaitable[None]],
+            send_to_dlq: Callable[[str], Awaitable[None]]) -> bool:
         """
         Process a message from Kafka.
         
@@ -48,12 +61,6 @@ class BaseHandler(abc.ABC):
             # Parse the envelope structure
             envelope = MessageEnvelope.from_dict(message_data)
             
-            # Validate the message format
-            if not self._validate_message(envelope):
-                await send_to_dlq("Invalid message format")
-                return True
-            
-            # Extract retry count if present
             try:
                 retry_count = int(envelope.header.get("retryCount", 0))
             except (ValueError, TypeError):
@@ -64,7 +71,13 @@ class BaseHandler(abc.ABC):
                 # Process the message
                 return await self._process_message(envelope)
                 
-            except Exception as e:
+            except NonRetryableError as e:
+                logger.exception(f"Unrecoverable error processing message, sending to DLQ: {e}")
+
+                await send_to_dlq(f"Error processing message: {str(e)}")
+                return True
+
+            except (RetryableError, Exception) as e:
                 logger.exception(f"Error processing message: {e}")
                 
                 # Check if we should retry
@@ -81,28 +94,6 @@ class BaseHandler(abc.ABC):
             logger.exception(f"Error parsing message envelope: {e}")
             await send_to_dlq(f"Error parsing message envelope: {str(e)}")
             return True
-    
-    
-    def _validate_message(self, envelope: MessageEnvelope) -> bool:
-        """
-        Validate message format.
-        
-        Args:
-            envelope: Message envelope to validate
-            
-        Returns:
-            bool: True if message is valid, False otherwise
-        """
-        # Validate required header fields
-        missing = [f for f in MessageEnvelope._REQUIRED_HEADERS if f not in envelope.header]
-        if missing:
-            logger.error(f"Missing required header fields: {', '.join(missing)}")
-            return False
-        
-        
-        
-        return True
-    
     
     
     

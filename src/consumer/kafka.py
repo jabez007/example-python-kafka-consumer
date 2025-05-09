@@ -148,7 +148,7 @@ class KafkaConsumer:
                                 
                                 """
                                 continue
-                            
+                             
                             # Process message
                             retry_callback = self._get_retry_callback(topic)
                             dlq_callback = self._get_dlq_callback(topic, msg.value)
