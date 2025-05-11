@@ -5,7 +5,6 @@ import datetime
 import json
 import logging
 import random
-import signal
 from copy import deepcopy
 from typing import Callable, Dict, Optional
 
@@ -49,11 +48,6 @@ class KafkaConsumer:
         
         """
         
-        # Set up signal handlers for graceful shutdown
-        
-        # Defer signal-handler registration until you’re inside the running loop
-        
-
         
         # These will be initialized in start() for aiokafka
         self.consumer: Optional[AIOKafkaConsumer] = None
@@ -101,21 +95,6 @@ class KafkaConsumer:
         
         await self.consumer.start()
 
-        # register signals on the running loop
-        loop = asyncio.get_running_loop()
-        for sig in (signal.SIGTERM, signal.SIGINT):
-            try:
-                loop.add_signal_handler(sig, lambda s=sig: asyncio.create_task(self._handle_shutdown(s)))
-            except NotImplementedError:
-                # Fallback for Windows / non-main thread
-                main_loop = loop  # captured from outer scope
-                def _sync_shutdown_handler(_sig, _frame, _loop=main_loop):
-                    _loop.call_soon_threadsafe(
-                        lambda: asyncio.create_task(self._handle_shutdown(_sig))
-                    )
-
-                signal.signal(sig, _sync_shutdown_handler)
-        
         await self.retry_producer.start()
         await self.dlq_producer.start()
         
@@ -180,21 +159,18 @@ class KafkaConsumer:
                                     """
                                     
                                     """
+                                    await asyncio.sleep(random.uniform(1, 3)) # avoid hammering both the broker and our logs.
+                                    break
                             except Exception as e:
-                                success = False
                                 logger.exception(f"Error processing message from {topic}: {e}")
                                 await self._send_to_dlq(topic, msg.value, str(e))
                                 await self.consumer.commit({tp: msg.offset + 1})
                                 """
                                 
                                 """
-                            finally:
-                                """
-                                
-                                """
-                                if not success:
-                                    await asyncio.sleep(random.uniform(1, 3)) # avoid hammering both the broker and our logs.
-                                    break
+                            """
+                            
+                            """
 
                         if not success: # The safest approach is to stop all processing upon any failure
                             await asyncio.sleep(random.uniform(1, 3)) # avoid hammering both the broker and our logs. 
