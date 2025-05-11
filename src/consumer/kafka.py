@@ -109,8 +109,8 @@ class KafkaConsumer:
             except NotImplementedError:
                 # Fallback for Windows / non-main thread
                 main_loop = loop  # captured from outer scope
-                def _sync_shutdown_handler(_sig, _frame):
-                    main_loop.call_soon_threadsafe(
+                def _sync_shutdown_handler(_sig, _frame, _loop=main_loop):
+                    _loop.call_soon_threadsafe(
                         lambda: asyncio.create_task(self._handle_shutdown(_sig))
                     )
 
@@ -143,6 +143,8 @@ class KafkaConsumer:
                             logger.warning(f"No handler registered for topic {topic}")
                             continue
 
+                        retry_callback = self._get_retry_callback(topic)
+
                         success = True
                         for msg in messages:
                             logger.info(f"Working message ({msg.offset}) from topic {topic}")
@@ -164,7 +166,6 @@ class KafkaConsumer:
                                 """
                                 
                                 """
-                                retry_callback = self._get_retry_callback(topic)
                                 dlq_callback = self._get_dlq_callback(topic, msg.value)
 
                                 success = await handler.handle(message_data, retry_callback, dlq_callback)
@@ -179,18 +180,21 @@ class KafkaConsumer:
                                     """
                                     
                                     """
-                                    await asyncio.sleep(random.uniform(1, 3)) # avoid hammering both the broker and our logs. 
-                                    break
                             except Exception as e:
+                                success = False
                                 logger.exception(f"Error processing message from {topic}: {e}")
                                 await self._send_to_dlq(topic, msg.value, str(e))
                                 await self.consumer.commit({tp: msg.offset + 1})
                                 """
                                 
                                 """
-                            """
-                            
-                            """
+                            finally:
+                                """
+                                
+                                """
+                                if not success:
+                                    await asyncio.sleep(random.uniform(1, 3)) # avoid hammering both the broker and our logs.
+                                    break
 
                         if not success: # The safest approach is to stop all processing upon any failure
                             await asyncio.sleep(random.uniform(1, 3)) # avoid hammering both the broker and our logs. 
@@ -250,7 +254,7 @@ class KafkaConsumer:
                 json.dumps(envelope_copy.to_dict()).encode('utf-8')
             )
             
-            logger.info(f"Message sent to retry topic {retry_topic}, attempt {retry_count}")
+            logger.info(f"Message sent to retry topic {retry_topic}, attempt {retry_count + 1}")
             """
             
             """

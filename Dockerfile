@@ -1,6 +1,10 @@
 # syntax=docker/dockerfile:1.4
 FROM python:3.11-slim as base
 
+LABEL maintainer="Your Name <your.email@example.com>"
+LABEL description="Kafka consumer with topic-specific handlers"
+LABEL version="0.1.0"
+
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
 WORKDIR /app
@@ -14,9 +18,14 @@ RUN adduser --disabled-password --gecos "" appuser
 COPY requirements.txt /app/
 
 # Install dependencies
-RUN pip install --no-cache-dir --upgrade pip && \
+RUN pip install --upgrade pip && \
     pip install --no-cache-dir -r requirements.txt
 
+
+# Clean up to reduce image size
+RUN apt-get autoremove -y && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/*
 
 # Copy project files with appropriate ownership
 COPY --chown=appuser:appuser . /app/
