@@ -22,9 +22,16 @@ class ConsumerConfig:
 
     _VALID_OFFSET_RESET = frozenset({"earliest", "latest", "none"})
 
-    bootstrap_servers: Optional[str] = field(default_factory=lambda: None)
+    # List of Kafka broker addresses (host:port)
+    bootstrap_servers: Optional[list[str]] = field(default_factory=lambda: None)
+
+    # Consumer group identifier for this consumer instance
     group_id: str = field(default_factory=lambda: os.getenv("KAFKA_GROUP_ID", "my_consumer_group"))
+
+    # Position to start reading when no offset is stored ('earliest', 'latest', 'none')
     auto_offset_reset: str = field(default_factory=lambda: os.getenv("KAFKA_AUTO_OFFSET_RESET", "earliest").casefold())
+
+    # Whether offsets should be automatically committed
     auto_commit_offset: Optional[bool] = field(default_factory=lambda: None)
 
     def __post_init__(self):
@@ -49,8 +56,8 @@ class ConsumerConfig:
                 elif isinstance(brokers, list):
                     pass
                 else:
-                    # Fallback for unexpected types
-                    brokers = [brokers_env]
+                    # Raise error for unexpected types after JSON parsing
+                    raise ValueError(f"KAFKA_BOOTSTRAP_SERVERS must be a string or list, got {type(brokers)}")
             except json.JSONDecodeError:
                 # Not valid JSON, treat as a single broker string
                 brokers = [brokers_env]
@@ -75,6 +82,14 @@ class ConsumerConfig:
         if not self.bootstrap_servers:
             raise ValueError("KAFKA_BOOTSTRAP_SERVERS must not be empty")
         
+        # Validate each broker string format
+        for broker in self.bootstrap_servers:
+            if not isinstance(broker, str) or not broker:
+                raise ValueError(f"Each bootstrap server must be a non-empty string, got {broker}")
+            # Optional: Add more strict validation if needed
+            # if ":" not in broker:
+            #     raise ValueError(f"Each bootstrap server should be in format 'host:port', got {broker}")
+
         # Validate group_id is not empty
         if not self.group_id:
             raise ValueError("KAFKA_GROUP_ID must not be empty")
