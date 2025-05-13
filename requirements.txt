@@ -1,0 +1,8 @@
+
+
+aiokafka==0.12.*
+
+pydantic==2.*
+python-dotenv[cli]==1.*
+
+

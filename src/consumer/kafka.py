@@ -1,0 +1,308 @@
+"""
+Kafka consumer implementation with dependency injection for handlers.
+"""
+import datetime
+import json
+import logging
+import random
+from copy import deepcopy
+from typing import Callable, Dict, Optional
+
+
+import asyncio
+from typing import Awaitable
+
+from aiokafka import AIOKafkaConsumer, AIOKafkaProducer
+
+
+
+from src.consumer.config import ConsumerConfig
+from src.handlers.base import BaseHandler
+from src.models.envelope import MessageEnvelope
+
+"""
+
+"""
+
+logger = logging.getLogger(__name__)
+
+
+class KafkaConsumer:
+    """
+    Kafka consumer that routes messages to topic-specific handlers and
+    manages offset commits based on handler success.
+    """
+
+    def __init__(self, config: Optional[ConsumerConfig] = None):
+        """
+        Initialize the Kafka consumer with configuration.
+        
+        Args:
+            config: Consumer configuration
+        """
+        self.config = config if config is not None else ConsumerConfig() 
+        self.handlers: Dict[str, BaseHandler] = {}
+        self.running = False
+        
+        """
+        
+        """
+        
+        
+        # These will be initialized in start() for aiokafka
+        self.consumer: Optional[AIOKafkaConsumer] = None
+        self.retry_producer: Optional[AIOKafkaProducer] = None
+        self.dlq_producer: Optional[AIOKafkaProducer] = None
+        
+
+    def register_handler(self, topic: str, handler: BaseHandler) -> None:
+        """
+        Register a handler for a specific topic.
+        
+        Args:
+            topic: Kafka topic name
+            handler: Handler instance for processing messages
+        """
+        self.handlers[topic] = handler
+        logger.info(f"Registered handler {handler.__class__.__name__} for topic {topic}")
+
+    
+    async def start(self) -> None:
+        """Start consuming messages from Kafka."""
+        if not self.handlers:
+            logger.error("No handlers registered. Exiting.")
+            return
+        
+        # Subscribe to topics
+        topics = list(self.handlers.keys())
+        
+        # Initialize consumer and producer
+        self.consumer = AIOKafkaConsumer(
+            *topics,
+            bootstrap_servers=self.config.bootstrap_servers,
+            group_id=self.config.group_id,
+            auto_offset_reset=self.config.auto_offset_reset,
+            enable_auto_commit=False,
+        )
+        
+        self.retry_producer = AIOKafkaProducer(
+            bootstrap_servers=self.config.bootstrap_servers,
+        )
+
+        self.dlq_producer = AIOKafkaProducer(
+            bootstrap_servers=self.config.bootstrap_servers,
+        )
+        
+        await self.consumer.start()
+
+        await self.retry_producer.start()
+        await self.dlq_producer.start()
+        
+        logger.info(f"Subscribed to topics: {', '.join(topics)}")
+        
+        self.running = True
+        
+        try:
+            while self.running:
+                try:
+                    # Poll with timeout (milliseconds)
+                    message_batch = await self.consumer.getmany(timeout_ms=1000)
+
+                    if not message_batch:
+                        continue
+
+                    # Process messages from all partitions
+                    for tp, messages in message_batch.items():
+                        logger.info(f"Received {len(messages)} messages from {tp.topic}:{tp.partition}")
+
+                        topic = tp.topic
+
+                        handler = self.handlers.get(topic)
+                        if not handler:
+                            logger.warning(f"No handler registered for topic {topic}")
+                            continue
+
+                        retry_callback = self._get_retry_callback(topic)
+
+                        success = True
+                        for msg in messages:
+                            logger.info(f"Working message ({msg.offset}) from topic {topic}")
+
+                            # Parse message
+                            try:
+                                message_data = json.loads(msg.value.decode('utf-8'))
+                            except (UnicodeError, json.JSONDecodeError):
+                                logger.error(f"Failed to decode message ({msg.offset}) as JSON from topic {topic}")
+                                await self._send_to_dlq(topic, msg.value, "Invalid JSON format")
+                                await self.consumer.commit({tp: msg.offset + 1})
+                                """
+                                
+                                """
+                                continue
+                            
+                            # Process message
+                            try:
+                                """
+                                
+                                """
+                                dlq_callback = self._get_dlq_callback(topic, msg.value)
+
+                                success = await handler.handle(message_data, retry_callback, dlq_callback)
+
+                                if success:
+                                    await self.consumer.commit({tp: msg.offset + 1})
+                                    """
+                                    
+                                    """
+                                else:
+                                    logger.warning(f"Handler returned False for message ({msg.offset}) on topic {topic}")
+                                    """
+                                    
+                                    """
+                                    await asyncio.sleep(random.uniform(1, 3)) # avoid hammering both the broker and our logs.
+                                    break
+                            except Exception as e:
+                                logger.exception(f"Error processing message from {topic}: {e}")
+                                await self._send_to_dlq(topic, msg.value, str(e))
+                                await self.consumer.commit({tp: msg.offset + 1})
+                                """
+                                
+                                """
+                            """
+                            
+                            """
+
+                        if not success: # The safest approach is to stop all processing upon any failure
+                            await asyncio.sleep(random.uniform(1, 3)) # avoid hammering both the broker and our logs. 
+                            break
+
+                except Exception as e:
+                    logger.exception(f"Consumer error: {e}")
+                    if self.running:
+                        await asyncio.sleep(random.uniform(1, 3)) # avoid hammering both the broker and our logs.
+                    
+        finally:
+            logger.info("Closing consumer and producers")
+            await self._shutdown_resources()
+
+    async def _shutdown_resources(self):
+        """Shutdown all resources in the correct order."""
+        logger.info("Closing producers and consumer")
+        if getattr(self, "consumer", None) and self.consumer._closed is False:
+            await self.consumer.stop()
+        if getattr(self, "retry_producer", None) and self.retry_producer._closed is False:
+            await self.retry_producer.stop()
+        if getattr(self, "dlq_producer", None) and self.dlq_producer._closed is False:
+            await self.dlq_producer.stop()
+
+    async def _retry_message(self, original_topic: str, failed_message: MessageEnvelope, reason: str) -> None:
+        """
+        Send a message to the retry queue.
+        
+        Args:
+            original_topic: Original topic the message came from
+            failed_message: Envelope of failed message
+            reason: Reason for retrying message
+        """
+        retry_topic = f'{original_topic}.retry'
+        
+        # Extract retry count if present
+        header = failed_message.header or {} # ensure not None
+        try:
+            retry_count = int(header.get("retryCount", 0))
+        except (ValueError, TypeError):
+            logger.warning(f"Invalid retryCount value: {header.get('retryCount')}, using 0")
+            retry_count = 0
+
+        envelope_copy = MessageEnvelope.from_dict(failed_message.to_dict())
+
+        # Increment retry count for next attempt
+        envelope_copy.header = deepcopy(header) # work on an isolated copy 
+        envelope_copy.header["retryCount"] = str(retry_count + 1)
+
+        # Include metadata about original topic
+        envelope_copy.header["originalTopic"] = original_topic
+        envelope_copy.header["retryReason"] = reason
+
+        try:
+            await self.retry_producer.send_and_wait(
+                retry_topic,
+                json.dumps(envelope_copy.to_dict()).encode('utf-8')
+            )
+            
+            logger.info(f"Message sent to retry topic {retry_topic}, attempt {retry_count + 1}")
+            """
+            
+            """
+
+        except Exception as e:
+            logger.error(f"Failed to send message to retry {retry_topic}: {e}")
+
+    async def _send_to_dlq(self, original_topic: str, message: bytes, reason: str) -> None:
+        """
+        Send a message to the dead letter queue.
+        
+        Args:
+            original_topic: Original topic the message came from
+            message: Original message bytes
+            reason: Reason for sending to DLQ
+        """
+        dlq_topic = f'{original_topic}.dlq'
+        
+        try:
+            # Create a wrapper that includes the original message and metadata
+            dlq_message = {
+                "original_message": message.decode('utf-8', errors='replace'),
+                "error_reason": reason,
+                "original_topic": original_topic,
+                "timestamp": datetime.datetime.now().isoformat()
+            }
+
+            await self.dlq_producer.send_and_wait(
+                dlq_topic,
+                json.dumps(dlq_message).encode('utf-8')
+            )
+            
+            logger.info(f"Message sent to DLQ topic {dlq_topic}")
+            """
+            
+            """
+
+        except Exception as e:
+            logger.error(f"Failed to send message to DLQ {dlq_topic}: {e}")
+
+    def _get_retry_callback(self, topic: str) -> Callable[[MessageEnvelope, str], Awaitable[None]]:
+        """
+        Return a callback function for handlers to send messages to retry topic.
+        
+        Args:
+            topic: Original topic
+        
+        Returns:
+            Callable function that sends to retry topic with given reason
+        """
+        async def retry_message(original_message: MessageEnvelope, reason: str) -> None:
+            await self._retry_message(topic, original_message, reason)
+        return retry_message
+
+    def _get_dlq_callback(self, topic: str, original_message: bytes) -> Callable[[str], Awaitable[None]]:
+        """
+        Return a callback function for handlers to send messages to DLQ.
+        
+        Args:
+            topic: Original topic
+            original_message: Original message bytes
+        
+        Returns:
+            Callable function that sends to DLQ with given reason
+        """
+        async def send_to_dlq(reason: str) -> None:
+            await self._send_to_dlq(topic, original_message, reason)
+        return send_to_dlq
+
+    async def _handle_shutdown(self, signum) -> None:
+        """Handle shutdown signals gracefully."""
+        logger.info("Received signal %s, shutting down…", signum)
+        self.running = False
+        await self._shutdown_resources()
+    
