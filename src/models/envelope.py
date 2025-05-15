@@ -2,11 +2,28 @@
 Message envelope model that follows a SOAP-like structure with header and body.
 """
 
+from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any, Dict
 
+# Common header fields and their descriptions
+COMMON_HEADER_FIELDS = {
+    "messageType": "Type of message (e.g., 'event', 'command', 'notification')",
+    "schemaName": "Name of the schema defining the message structure",
+    "schemaVersion": "Version of the message schema (optional)",
+    "correlationId": "identifier linking related messages",
+    "messageId": "Unique identifier for the message",
+    "timestamp": "ISO 8601 timestamp when the message was created",
+    "producer": "System or service that created the message",
+    "contentType": "Content type of the body (optional)",
+    "replyTo": "Topic to reply to (optional)",
+    "priority": "Message priority (optional)",
+    "ttl": "Time-to-live in seconds (optional)",
+    "retryCount": "Number of retry attempts (optional, used internally)",
+}
 
-@dataclass
+
+@dataclass(slots=True)
 class MessageEnvelope:
     """
     Message envelope with header and body sections.
@@ -15,8 +32,31 @@ class MessageEnvelope:
     across all topics. The body contains topic-specific data.
     """
 
+    _REQUIRED_HEADERS = {
+        "messageType",
+        "schemaName",
+        "correlationId",
+        "messageId",
+        "timestamp",
+        "producer"
+    }
+
     header: Dict[str, Any]
     body: Dict[str, Any]
+
+    def __post_init__(self) -> None:
+        self._validate_header(self.header)
+
+    def _validate_header(self, header: dict) -> None:
+        # define required and allowed headers 
+        missing = self._REQUIRED_HEADERS.difference(header)
+        if missing:
+            raise ValueError(f"Missing required header fields: {missing}")
+
+        # catch any unexpected header keys
+        unexpected = [k for k in header if k not in COMMON_HEADER_FIELDS]
+        if unexpected:
+            raise ValueError(f"Unexpected header fields: {unexpected}")
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "MessageEnvelope":
@@ -31,10 +71,15 @@ class MessageEnvelope:
 
         Raises:
             ValueError: If the dictionary is missing required fields
+            TypeError: If header or body is not a dictionary
         """
-        if "header" not in data or "body" not in data:
+
+        expected = {"header", "body"}
+        # A schema might legitimately allow {} in the body (e.g., a ping event).
+        if set(data) != expected or not data["header"]:
             raise ValueError("Message must contain 'header' and 'body' sections")
 
+        # Header must be truthy because required keys will be validated later
         if not isinstance(data["header"], dict) or not isinstance(data["body"], dict):
             raise TypeError("'header' and 'body' must be dictionaries")
 
@@ -45,23 +90,10 @@ class MessageEnvelope:
         Convert envelope to dictionary.
 
         Returns:
-            Dict: Dictionary representation of the envelope
+            Dict: Deep copy dictionary representation of the envelope,
+                  preventing mutation of the original envelope data
         """
-        return {"header": self.header, "body": self.body}
-
-
-# Common header fields and their descriptions
-COMMON_HEADER_FIELDS = {
-    "messageType": "",
-    "schemaName": "",
-    "schemaVersion": "Version of the message schema (optional)",
-    "correlationId": "identifier linking related messages",
-    "messageId": "Unique identifier for the message",
-    "timestamp": "ISO 8601 timestamp when the message was created",
-    "producer": "System or service that created the message",
-    "contentType": "Content type of the body (optional)",
-    "replyTo": "Topic to reply to (optional)",
-    "priority": "Message priority (optional)",
-    "ttl": "Time-to-live in seconds (optional)",
-    "retryCount": "Number of retry attempts (optional, used internally)",
-}
+        return {
+            "header": deepcopy(self.header),
+            "body": deepcopy(self.body)
+        }

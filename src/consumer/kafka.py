@@ -4,9 +4,12 @@ Kafka consumer implementation with dependency injection for handlers.
 import datetime
 import json
 import logging
-import signal
+import random
+from copy import deepcopy
 from typing import Callable, Dict, Optional
 
+
+from time import sleep
 
 from confluent_kafka import Consumer, KafkaError, Message, Producer
 
@@ -44,12 +47,6 @@ class KafkaConsumer:
         
         """
         
-        # Set up signal handlers for graceful shutdown
-        
-        signal.signal(signal.SIGTERM, self._handle_shutdown)
-        signal.signal(signal.SIGINT, self._handle_shutdown)
-        
-
         
         # Configure Kafka consumer
         self.consumer = Consumer({
@@ -62,18 +59,20 @@ class KafkaConsumer:
         # Configure retry producer
         self.retry_producer = Producer({
             'bootstrap.servers': self.config.bootstrap_servers,
-            'retries': 3,
+            'message.send.max.retries': 3,
             'retry.backoff.ms': 500,
             'delivery.timeout.ms': 10000,
         })
         # Configure dead letter queue producer
         self.dlq_producer = Producer({
             'bootstrap.servers': self.config.bootstrap_servers,
-            'retries': 3,
+            'message.send.max.retries': 3,
             'retry.backoff.ms': 500,
             'delivery.timeout.ms': 10000,
         })
         
+
+        logger.debug("KafkaConsumer initialized with config: %s", self.config)
 
     def register_handler(self, topic: str, handler: BaseHandler) -> None:
         """
@@ -95,6 +94,7 @@ class KafkaConsumer:
         
         # Subscribe to topics
         topics = list(self.handlers.keys())
+        logger.info("Topics to subscribe: %s", topics)
         self.consumer.subscribe(topics)
         logger.info(f"Subscribed to topics: {', '.join(topics)}")
         
@@ -102,7 +102,7 @@ class KafkaConsumer:
         
         try:
             while self.running:
-                msg = self.consumer.poll(timeout=1.0)
+                msg = self.consumer.poll(timeout=1.0) # 1 second
                 
                 if msg is None:
                     continue
@@ -114,6 +114,8 @@ class KafkaConsumer:
                         logger.error(f"Kafka error: {msg.error()}")
                     continue
                 
+                logger.info("Received message offset=%d from %s:%d", msg.offset(), msg.topic(), msg.partition())
+
                 topic = msg.topic()
                 """
                 
@@ -128,8 +130,8 @@ class KafkaConsumer:
                     # Parse message
                     try:
                         message_data = json.loads(msg.value().decode('utf-8'))
-                    except json.JSONDecodeError:
-                        logger.error(f"Failed to decode message as JSON from topic {topic}")
+                    except (UnicodeError, json.JSONDecodeError):
+                        logger.error(f"Failed to decode message ({msg.offset()}) as JSON from topic {topic}")
                         self._send_to_dlq(topic, msg.value(), "Invalid JSON format")
                         self.consumer.commit(msg)
                         """
@@ -138,21 +140,24 @@ class KafkaConsumer:
                         continue
                     
                     # Process message
+                    logger.debug("Processing message offset=%d from topic=%s", msg.offset(), topic)
                     success = handler.handle(message_data, self._get_retry_callback(topic), self._get_dlq_callback(topic, msg.value()))
                     
                     if success:
+                        logger.info("Successfully processed message offset=%d on topic=%s", msg.offset(), topic)
                         self.consumer.commit(msg)
                         """
                         
                         """
                     else:
-                        logger.warning(f"Handler returned False for message in topic {topic}")
+                        logger.warning(f"Handler returned False for message ({msg.offset()}) on topic {topic}")
+                        sleep(random.uniform(1, 3)) # avoid hammering both the broker and our logs. 
                         """
                         
                         """
                     
                 except Exception as e:
-                    logger.exception(f"Error processing message from {topic}: {e}")
+                    logger.exception(f"Error processing message ({msg.offset()}) from {topic}: {e}")
                     self._send_to_dlq(topic, msg.value(), str(e))
                     self.consumer.commit(msg)
                     """
@@ -184,32 +189,40 @@ class KafkaConsumer:
         retry_topic = f'{original_topic}.retry'
 
         # Extract retry count if present
-        retry_count = int(failed_message.header.get("retryCount", 0))
+        header = failed_message.header or {} # ensure not None
+        try:
+            retry_count = int(header.get("retryCount", 0))
+        except (ValueError, TypeError):
+            logger.warning(f"Invalid retryCount value: {header.get('retryCount')}, using 0")
+            retry_count = 0
+
+        envelope_copy = MessageEnvelope.from_dict(failed_message.to_dict())
 
         # Increment retry count for next attempt
-        failed_message.header["retryCount"] = retry_count + 1
+        envelope_copy.header = deepcopy(header)  # work on an isolated copy
+        envelope_copy.header["retryCount"] = str(retry_count + 1)
 
         # Include metadata about original topic
-        failed_message.header["originalTopic"] = original_topic
-        failed_message.header["retryReason"] = reason
+        envelope_copy.header["originalTopic"] = original_topic
+        envelope_copy.header["retryReason"] = reason
 
         try:
             # Produce new message with updated headers
             self.retry_producer.produce(
                 retry_topic,
-                json.dumps(failed_message.to_dict()).encode("utf-8"),
+                json.dumps(envelope_copy.to_dict()).encode("utf-8"),
                 callback=self._delivery_report
             )
             # allow delivery callback processing without blocking
             self.retry_producer.poll(0)
     
-            logger.info(f"Message sent to retry topic {retry_topic}, attempt {retry_count}")
+            logger.info(f"Message sent to retry topic {retry_topic}, attempt {retry_count + 1}")
             """
             
             """
 
         except Exception as e:
-            logger.error(f"Failed to send retry message to retry {retry_topic}: {e}")
+            logger.error(f"Failed to send message to retry {retry_topic}: {e}")
 
 
     def _send_to_dlq(self, original_topic: str, message: bytes, reason: str) -> None:

@@ -7,12 +7,21 @@ from typing import Any, Callable, Dict
 
 
 
-
-
 from src.models.envelope import MessageEnvelope
 
 logger = logging.getLogger(__name__)
 
+class ProcessingError(Exception):
+    """Base exception for all message processing errors"""
+    pass
+
+class RetryableError(ProcessingError):
+    """Error indicating message should be retried"""
+    pass
+
+class NonRetryableError(ProcessingError):
+    """Error indicating message should go to DLQ"""
+    pass
 
 class BaseHandler(abc.ABC):
     """
@@ -26,76 +35,63 @@ class BaseHandler(abc.ABC):
         Args:
             max_retries: Maximum number of retry attempts before sending to DLQ
         """
-        self.max_retries = max_retries
+        self._max_retries = max_retries
     
     
-    def handle(self, message_data: Dict[str, Any], retry_message: Callable[[MessageEnvelope, str], None], send_to_dlq: Callable[[str], None]) -> bool:
+    def handle(
+            self,
+            message_data: Dict[str, Any],
+            retry_message: Callable[[MessageEnvelope, str], None],
+            send_to_dlq: Callable[[str], None]) -> bool:
         """
         Process a message from Kafka.
         
         Args:
             message_data: The JSON-decoded message data
+            retry_message: Callback function to retry processing a message
             send_to_dlq: Callback function to send message to DLQ
             
         Returns:
-            bool: True if message was processed successfully, False otherwise
+            bool: True if the message was handled (successfully processed, sent to DLQ, or scheduled for retry),
+                  False if handling failed and the message should be reprocessed
         """
+        # Parse the envelope structure
         try:
-            # Parse the envelope structure
             envelope = MessageEnvelope.from_dict(message_data)
-            
-            # Validate the message format
-            if not self._validate_message(envelope):
-                send_to_dlq("Invalid message format")
-                return True
-            
-            # Extract retry count if present
-            retry_count = int(envelope.header.get("retryCount", 0))
-            
-            try:
-                # Process the message
-                return self._process_message(envelope)
-                
-            except Exception as e:
-                logger.exception(f"Error processing message: {e}")
-                
-                # Check if we should retry
-                if retry_count < self.max_retries:
-                    logger.info(f"Retrying message, attempt {retry_count + 1} of {self.max_retries}")
-                    retry_message(envelope, str(e))
-                    return True
-                else:
-                    logger.warning(f"Max retries ({self.max_retries}) reached, sending to DLQ")
-                    send_to_dlq(f"Max retries reached: {str(e)}")
-                    return True
-                    
-        except Exception as e:
+        except (ValueError, TypeError) as e:
             logger.exception(f"Error parsing message envelope: {e}")
             send_to_dlq(f"Error parsing message envelope: {str(e)}")
             return True
-    
-    
-    def _validate_message(self, envelope: MessageEnvelope) -> bool:
-        """
-        Validate message format.
-        
-        Args:
-            envelope: Message envelope to validate
-            
-        Returns:
-            bool: True if message is valid, False otherwise
-        """
-        # Validate required header fields
-        required_fields = ["messageType", "timestamp", "producer"]
-        for field in required_fields:
-            if field not in envelope.header:
-                logger.error(f"Missing required header field: {field}")
-                return False
-        
-        
-        
-        return True
-    
+
+        # Extract retry count if present
+        try:
+            retry_count = int(envelope.header.get("retryCount", 0))
+        except (ValueError, TypeError):
+            logger.warning(f"Invalid retryCount value: {envelope.header.get('retryCount')}, using 0")
+            retry_count = 0
+             
+        try:
+            # Process the message
+            return self._process_message(envelope)
+                
+        except NonRetryableError as e:
+            logger.exception(f"Unrecoverable error processing message, sending to DLQ: {e}")
+
+            send_to_dlq(f"Error processing message: {str(e)}")
+            return True
+
+        except RetryableError as e:
+            logger.exception(f"Error processing message: {e}")
+                
+            # Check if we should retry
+            if retry_count < self._max_retries:
+                logger.info(f"Retrying message, attempt {retry_count + 1} of {self._max_retries}")
+                retry_message(envelope, str(e))
+                return True
+            else:
+                logger.warning(f"Max retries ({self._max_retries}) reached, sending to DLQ")
+                send_to_dlq(f"Max retries reached: {str(e)}")
+                return True
     
     
     
@@ -106,6 +102,10 @@ class BaseHandler(abc.ABC):
         
         Args:
             envelope: Message envelope containing header and body
+
+        Returns:
+            bool: True if the message was successfully processed and should be committed,
+                  False if processing failed and the message should not be committed
         """
         pass
     
